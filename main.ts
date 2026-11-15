@@ -16,10 +16,10 @@
 // says the workload is done. A process still running when the wall is spent
 // scores zero, so nothing here waits on anything but the env.
 //
-// Routing lives in lib/router.ts (greedy by rating, online failure learning,
-// revival of dead providers); the wires live in lib/wires.ts (faithful
-// translation both ways, usage and stop family carried through); the brief
-// and catalog live in lib/brief.ts.
+// Routing lives in lib/router.ts (greedy by rating, evidence-based dead
+// rule, conditional same-model retry, fallback-only revival); the wires
+// live in lib/wires.ts (faithful translation both ways, usage and stop
+// family carried through); the brief and catalog live in lib/brief.ts.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
@@ -28,6 +28,7 @@ import {
   parseBrief,
   probeCatalog,
   ratingRowFor,
+  synthesizedModels,
   type Brief,
   type Catalog,
   type Json,
@@ -83,13 +84,18 @@ async function load(): Promise<void> {
   router = new Router(brief, probes);
 }
 
-/** The free models across the providers that answered, deduplicated by id. */
+/**
+ * The free models across the providers, deduplicated by id. A provider whose
+ * probe failed still contributes the models the quality table names for it,
+ * exactly as the catalog does: GET /v1/models must hold precisely the set of
+ * free ids the catalog registers.
+ */
 function servedModels(): ServedModel[] {
   const seen = new Set<string>();
   const out: ServedModel[] = [];
   for (const probe of probes) {
-    if (!probe.ok) continue;
-    const sorted = [...probe.models].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const listed = probe.ok ? probe.models : synthesizedModels(brief.ratings, probe.entry.id);
+    const sorted = [...listed].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     for (const model of sorted) {
       if (seen.has(model.id)) continue;
       const row = ratingRowFor(brief.ratings, probe.entry.id, model.id);

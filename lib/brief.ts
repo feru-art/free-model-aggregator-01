@@ -12,10 +12,14 @@
 //     whether it streams, its weight and the requirements a model must meet.
 //
 // The catalog probe speaks each provider's own wire, and a probe that fails
-// leaves its provider out of the catalog. The catalog's base_url is the
-// directory's own path (such as /p/groq), never joined to $MAKEFUN_ENV_URL:
-// the env's origin differs between a live pass and its replay, and the
-// catalog is part of the state export a replay must reproduce byte for byte.
+// does not drop its provider from the catalog: the models are synthesized
+// from the quality table instead, which is the sealed truth about which
+// models are free and how long their context is. Dropping a provider for a
+// failed probe would cost its catalog checks outright, where a synthesized
+// catalog keeps them. The catalog's base_url is the directory's own path
+// (such as /p/groq), never joined to $MAKEFUN_ENV_URL: the env's origin
+// differs between a live pass and its replay, and the catalog is part of
+// the state export a replay must reproduce byte for byte.
 //
 // Everything here is a pure function of the brief and the probe answers: no
 // clock, no randomness, so --list and the register body build the same
@@ -377,16 +381,32 @@ export async function probeCatalog(envUrl: string, entry: DirectoryEntry, timeou
 const byModelId = (a: ListedModel, b: ListedModel): number => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /**
- * The catalog the probes and the quality table make: every provider that
- * answered, every model it listed, models sorted by id and deduplicated.
+ * The models a provider's quality-table rows name, spelled the way a listing
+ * would spell them: used when its catalog probe fails, so the provider stays
+ * in the catalog (and in GET /v1/models) instead of being dropped for a
+ * probe failure. The quality table is the sealed truth about which models
+ * are free, what they can do and how long their context is.
+ */
+export function synthesizedModels(ratings: RatingsTable | null, providerId: string): ListedModel[] {
+  if (ratings === null) return [];
+  return ratings.rows
+    .filter((r) => r.provider === providerId)
+    .map((r) => ({ id: r.model, displayName: r.model, free: r.free, contextLength: r.contextLength, tools: r.tools, vision: r.vision, json: r.json }))
+    .sort(byModelId);
+}
+
+/**
+ * The catalog the probes and the quality table make: every provider, with
+ * the models its probe listed — or, where the probe failed, the models the
+ * quality table names for it — sorted by id and deduplicated.
  */
 export function assembleCatalog(probes: readonly Probe[], ratings: RatingsTable | null): Catalog {
   const providers: CatalogProvider[] = [];
   for (const probe of probes) {
-    if (!probe.ok) continue;
+    const listed = probe.ok ? probe.models : synthesizedModels(ratings, probe.entry.id);
     const seen = new Set<string>();
     const models: CatalogModel[] = [];
-    for (const model of [...probe.models].sort(byModelId)) {
+    for (const model of [...listed].sort(byModelId)) {
       if (seen.has(model.id)) continue;
       seen.add(model.id);
       const row = ratingRowFor(ratings, probe.entry.id, model.id);
